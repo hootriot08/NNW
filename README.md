@@ -1,151 +1,136 @@
-# NNW - Embedding Service Integration
+# NNW Score Calculator
 
-This project integrates with LM Studio's local embedding API to provide easy-to-use text embedding functionality.
+A Python tool that compares earnings call transcripts with EPS numbers to calculate Narrative-Number Wedge (NNW) scores.
+
+## What it does
+
+The NNW score measures how much the earnings call narrative differs from the actual EPS numbers:
+
+1. Takes the transcript text and EPS numbers
+2. Gets embeddings for both using LM Studio
+3. Calculates how similar they are (cosine similarity)
+4. NNW = 1 - similarity (higher = more disconnect)
 
 ## Setup
 
-### Prerequisites
-1. **LM Studio**: Download and install [LM Studio](https://lmstudio.ai/)
-2. **Model**: Load the `text-embedding-bge-small-en-v1.5` model in LM Studio
-3. **Server**: Start the LM Studio server on `http://127.0.0.1:1234`
+### Install dependencies
 
-### Installation
 ```bash
-# Install Python dependencies
 pip install -r requirements.txt
 ```
 
+### Start LM Studio
+
+1. Download [LM Studio](https://lmstudio.ai/)
+2. Load the `bge-small-en-v1.5` model
+3. Start the local server (usually http://localhost:1234)
+
+### Data structure
+
+```
+NNW/
+├── data/
+│   └── eps_comparison.csv      # Your EPS data
+├── transcripts_by_company/     # Transcript files
+├── nnw_minimal.py
+└── requirements.txt
+```
+
+## CSV Format
+
+Your EPS data needs these columns:
+
+| Column | Description | Example |
+|--------|-------------|---------|
+| `ticker` | Stock symbol | `AAPL` |
+| `period` | Time period | `2024Q2` |
+| `eps_actual` | Actual EPS | `1.25` |
+| `eps_forecast` | Forecast EPS | `1.20` |
+| `transcript_path` | (Optional) Path to transcript | `transcripts/AAPL_2024Q2.txt` |
+
 ## Usage
 
-### Quick Start
-```python
-from embedding_service import get_embedding, get_embeddings
-
-# Single embedding
-embedding = get_embedding("Your text here")
-print(f"Embedding dimension: {len(embedding)}")
-
-# Multiple embeddings
-texts = ["Text 1", "Text 2", "Text 3"]
-embeddings = get_embeddings(texts)
-```
-
-### Service Class Usage
-```python
-from embedding_service import EmbeddingService
-
-# Initialize service
-service = EmbeddingService()
-
-# Check server status
-if service.is_server_available():
-    # Get single embedding
-    embedding = service.get_embedding("Sample text")
-    
-    # Get multiple embeddings
-    embeddings = service.get_embeddings(["Text 1", "Text 2"])
-    
-    # Batch processing for large datasets
-    embeddings = service.get_embeddings_batch(large_text_list, batch_size=10)
-```
-
-### Example Applications
-
-#### 1. Document Similarity
-```python
-from embedding_service import get_embeddings, get_embedding
-import numpy as np
-
-# Your documents
-documents = ["Document 1 text", "Document 2 text", "Document 3 text"]
-query = "Search query"
-
-# Get embeddings
-doc_embeddings = get_embeddings(documents)
-query_embedding = get_embedding(query)
-
-# Calculate similarities
-similarities = []
-for doc_embedding in doc_embeddings:
-    similarity = np.dot(query_embedding, doc_embedding) / (
-        np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
-    )
-    similarities.append(similarity)
-
-# Find most similar document
-most_similar_idx = np.argmax(similarities)
-print(f"Most similar: {documents[most_similar_idx]}")
-```
-
-#### 2. Text Classification
-```python
-# Get embeddings for training data
-training_texts = ["Positive text 1", "Negative text 1", "Positive text 2"]
-training_embeddings = get_embeddings(training_texts)
-
-# Use embeddings with your favorite ML library (scikit-learn, etc.)
-```
-
-## API Reference
-
-### EmbeddingService Class
-
-#### `__init__(base_url, model)`
-- `base_url`: LM Studio server URL (default: "http://127.0.0.1:1234")
-- `model`: Model identifier (default: "text-embedding-bge-small-en-v1.5")
-
-#### Methods
-- `get_embedding(text)`: Get embedding for single text
-- `get_embeddings(texts)`: Get embeddings for multiple texts
-- `get_embeddings_batch(texts, batch_size)`: Process texts in batches
-- `is_server_available()`: Check if server is reachable
-- `get_server_info()`: Get server model information
-
-### Convenience Functions
-- `get_embedding(text, base_url)`: Quick single embedding
-- `get_embeddings(texts, base_url)`: Quick multiple embeddings
-- `check_server_status(base_url)`: Quick server check
-
-## Running Examples
+### Basic run
 
 ```bash
-# Test the embedding service
-python embedding_service.py
-
-# Run comprehensive examples
-python example_usage.py
+python3 nnw_minimal.py
 ```
 
-## Configuration
+### Filter data
 
-The service uses these default settings:
-- **Server URL**: `http://127.0.0.1:1234`
-- **Model**: `text-embedding-bge-small-en-v1.5`
-- **Timeout**: 30 seconds for requests
-- **Batch size**: 10 texts per batch
+```bash
+python3 nnw_minimal.py --tickers AAPL,MSFT --periods 2024Q2
+```
 
-You can customize these by passing parameters to the `EmbeddingService` constructor.
+### Custom files
+
+```bash
+python3 nnw_minimal.py \
+  --eps_csv data/my_data.csv \
+  --transcripts_dir my_transcripts \
+  --out_csv results.csv
+```
+
+## Options
+
+| Option | Default | What it does |
+|--------|---------|-------------|
+| `--eps_csv` | `data/eps_comparison.csv` | EPS data file |
+| `--transcripts_dir` | `transcripts` | Where transcripts are |
+| `--out_csv` | `nnw_output.csv` | Output file |
+| `--tickers` | None | Filter by tickers |
+| `--periods` | None | Filter by periods |
+| `--model` | `bge-small-en-v1.5` | LM Studio model |
+| `--api_base` | `http://localhost:1234/v1` | API URL |
+| `--max_chars` | `8000` | Max transcript length |
+| `--qa_split_hint` | `Q&A` | Where to cut transcript |
+
+## Output
+
+The script creates a CSV with:
+
+| Column | Description |
+|--------|-------------|
+| `ticker` | Stock symbol |
+| `period` | Time period |
+| `eps_actual` | Actual EPS |
+| `eps_forecast` | Forecast EPS |
+| `transcript_path` | Transcript file used |
+| `cosine` | Similarity (0-1) |
+| `nnw` | NNW score (0-1, higher = more disconnect) |
+
+## How it finds transcripts
+
+1. Uses `transcript_path` column if it exists
+2. Otherwise searches for files with ticker and period in the name
+3. Picks the biggest file if multiple matches
+4. Skips with warning if nothing found
+
+## Example output
+
+```
+Processing 2 rows...
+Computing NNW scores: 100%|████████| 2/2 [00:05<00:00,  2.50s/it]
+
+Results written to nnw_output.csv
+
+Processed: 2 | Skipped: 0
+
+Top NNW scores:
+1) MSFT 2024Q2  NNW=0.372  cosine=0.628
+2) AAPL 2024Q2  NNW=0.315  cosine=0.685
+```
 
 ## Troubleshooting
 
-### Server Not Available
-- Ensure LM Studio is running
-- Check that the server is started on port 1234
-- Verify the model is loaded in LM Studio
+### LM Studio not working
+- Make sure it's running on http://localhost:1234
+- Check the `bge-small-en-v1.5` model is loaded
 
-### Connection Errors
-- Check firewall settings
-- Ensure the server URL is correct
-- Try increasing the timeout value
+### Can't find transcripts
+- Check filenames have both ticker and period
+- Use `--transcripts_dir` if files are elsewhere
 
-### Memory Issues
-- Use batch processing for large datasets
-- Reduce batch size if experiencing memory issues
-- Consider processing texts in smaller chunks
-
-## Files
-
-- `embedding_service.py`: Main service module
-- `example_usage.py`: Comprehensive usage examples
-- `requirements.txt`: Python dependencies
-- `eps_comparison_comprehensive_with_eps_values.csv.csv`: Your EPS data file
+### Memory issues
+- Reduce `--max_chars` to limit transcript size
+- Process fewer tickers at once
