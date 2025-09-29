@@ -90,9 +90,9 @@ def cosine(a, b):
     return float(np.dot(a, b) / denom) if denom > 0 else 0.0
 
 
-def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model):
+def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model):
     """
-    Enhanced NNW calculation with dynamic EPS enrichment based on surprise level.
+    Basic NNW calculation - just compares transcript to EPS context.
     
     Args:
         transcript: Full transcript text
@@ -105,31 +105,31 @@ def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_b
     Returns:
         tuple: (cosine_similarity, nnw_score)
     """
-    # Step 1: Calculate surprise percentage
+    # calculate surprise percentage
     surprise_pct = abs((eps_actual - eps_forecast) / eps_forecast) * 100
     beat_miss = eps_actual > eps_forecast
     
-    # Step 2: Create dynamically enriched EPS context based on surprise level
+    # create enriched EPS context with intensity-based language
     if beat_miss:
-        if surprise_pct >= 100:  # Massive beat (100%+)
-            numbers_text = f"The company delivered an extraordinary earnings beat with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a staggering {surprise_pct:.1f}% surprise. This exceptional performance demonstrates outstanding execution, remarkable operational excellence, and exceptional market outperformance that exceeded all expectations."
-        elif surprise_pct >= 50:  # Large beat (50-99%)
-            numbers_text = f"The company achieved a remarkable earnings beat with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing an impressive {surprise_pct:.1f}% surprise. This strong performance reflects excellent execution, robust operational results, and significant market outperformance."
-        elif surprise_pct >= 20:  # Solid beat (20-49%)
-            numbers_text = f"The company delivered a solid earnings beat with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This performance demonstrates good execution and positive operational results."
-        else:  # Modest beat (<20%)
-            numbers_text = f"The company slightly beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This modest outperformance shows steady execution."
+        if surprise_pct >= 100:  # Extraordinary beat (100%+)
+            numbers_text = f"The company delivered a blowout earnings performance with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a spectacular {surprise_pct:.1f}% surprise. This record-breaking, unprecedented performance demonstrates outstanding execution and exceptional market outperformance."
+        elif surprise_pct >= 50:  # Strong beat (50-99%)
+            numbers_text = f"The company outperformed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing an exceptional {surprise_pct:.1f}% surprise. This very strong performance was well ahead of expectations and demonstrates solid execution."
+        elif surprise_pct >= 20:  # Moderate beat (20-49%)
+            numbers_text = f"The company beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This solid performance was stronger than forecast and shows good execution."
+        else:  # Marginal beat (<20%)
+            numbers_text = f"The company slightly beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This narrow beat was in line but positive, showing steady execution."
     else:
-        if surprise_pct >= 100:  # Massive miss (100%+)
-            numbers_text = f"The company experienced a devastating earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a catastrophic {surprise_pct:.1f}% shortfall. This severe underperformance reflects significant operational challenges, major execution issues, and concerning market headwinds."
+        if surprise_pct >= 100:  # Severe miss (100%+)
+            numbers_text = f"The company experienced a collapse in earnings with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a disastrous {surprise_pct:.1f}% shortfall. This major earnings shortfall reflects crippling operational challenges and severe market headwinds."
         elif surprise_pct >= 50:  # Large miss (50-99%)
-            numbers_text = f"The company reported a significant earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a substantial {surprise_pct:.1f}% shortfall. This disappointing performance reflects operational challenges and execution difficulties."
-        elif surprise_pct >= 20:  # Solid miss (20-49%)
-            numbers_text = f"The company missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This underperformance indicates some operational challenges."
-        else:  # Modest miss (<20%)
-            numbers_text = f"The company slightly missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This modest underperformance shows some execution challenges."
+            numbers_text = f"The company reported a sharp earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This disappointing earnings performance was well below expectations and reflects significant operational challenges."
+        elif surprise_pct >= 20:  # Moderate miss (20-49%)
+            numbers_text = f"The company missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This earnings miss fell short of expectations and shows weaker than expected performance."
+        else:  # Marginal miss (<20%)
+            numbers_text = f"The company slightly missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This narrow shortfall was just under expectations but shows some execution challenges."
     
-    # Step 3: Extract meaningful content sections (skip greetings and goodbyes)
+    # extract meaningful content (skip greetings and goodbyes)
     words = transcript.split()
     if len(words) > 200:
         # Skip initial greetings and find the start of actual content
@@ -141,7 +141,7 @@ def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_b
             'conference call', 'earnings call', 'quarterly call'
         ]
         
-        # Find the first meaningful content after greetings
+        # find where actual content starts
         for i, word in enumerate(words[:50]):  # Check first 50 words for greetings
             if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in greeting_patterns):
                 start_idx = i + 3  # Skip the greeting phrase
@@ -154,7 +154,7 @@ def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_b
             'end of call', 'call is concluded', 'operator', 'questions'
         ]
         
-        # Find the last meaningful content before closing
+        # find where content ends
         for i in range(len(words) - 50, len(words)):
             if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in closing_patterns):
                 end_idx = i
@@ -167,11 +167,11 @@ def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_b
         else:
             transcript_extract = ' '.join(meaningful_words)
         
-        # Step 4: Extract additional financial sentences with key terminology
+        # extract financial sentences with key terms
         financial_sentences = []
         sentences = transcript.split('.')
         
-        # Financial terminology patterns
+        # financial terms to look for
         financial_patterns = [
             # EPS and earnings terms
             'eps', 'earnings per share', 'earnings', 'profit', 'income', 'revenue',
@@ -192,7 +192,7 @@ def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_b
             'dollar', '$', 'cents', 'share', 'shares'
         ]
         
-        # Sentiment-based patterns for more targeted extraction
+        # sentiment words to look for
         positive_words = ['strong', 'exceed', 'outperform', 'growth', 'record', 'pleased', 
                          'excellent', 'robust', 'solid', 'positive', 'improve', 'increase', 
                          'rise', 'gain', 'success', 'momentum', 'expansion', 'outstanding', 
@@ -231,29 +231,19 @@ def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_b
         # For short transcripts, use the full text
         transcript_extract = transcript
     
-    # Step 5: Get embeddings and compute similarity
+    # get embeddings and compute similarity
     try:
         embeddings = embed_func([transcript_extract, numbers_text], api_base, model)
         transcript_embedding, numbers_embedding = embeddings
         
         cosine_sim = cosine(transcript_embedding, numbers_embedding)
         
-        # Step 6: Apply surprise-level weighting
-        # Higher surprise = more weight to the comparison
-        # This increases differentiation for larger surprises
-        surprise_weight = min(2.0, max(0.5, surprise_pct / 50))  # Weight between 0.5x and 2.0x
-        
-        # Apply the weight to the similarity score
-        weighted_similarity = cosine_sim * surprise_weight
-        
-        # Ensure the weighted similarity doesn't exceed 1.0
-        weighted_similarity = min(1.0, weighted_similarity)
-        
-        nnw_score = 1.0 - weighted_similarity
+        # Basic NNW calculation
+        nnw_score = 1.0 - cosine_sim
         
         return cosine_sim, nnw_score
     except Exception as e:
-        raise Exception(f"Failed to compute balanced NNW: {e}")
+        raise Exception(f"Failed to compute NNW: {e}")
 
 
 def parse_float_safe(value):
@@ -378,8 +368,8 @@ def main():
             continue
         
         try:
-            # use the new balanced NNW calculation with dynamic enrichment
-            cosine_sim, nnw = compute_balanced_nnw(
+            # compute NNW score
+            cosine_sim, nnw = compute_simple_nnw(
                 transcript_text, eps_actual, eps_forecast, 
                 embed, args.api_base, args.model
             )
