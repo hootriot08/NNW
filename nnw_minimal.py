@@ -90,6 +90,172 @@ def cosine(a, b):
     return float(np.dot(a, b) / denom) if denom > 0 else 0.0
 
 
+def compute_balanced_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model):
+    """
+    Enhanced NNW calculation with dynamic EPS enrichment based on surprise level.
+    
+    Args:
+        transcript: Full transcript text
+        eps_actual: Actual EPS value
+        eps_forecast: Forecast EPS value
+        embed_func: Function to get embeddings
+        api_base: API base URL
+        model: Model name
+    
+    Returns:
+        tuple: (cosine_similarity, nnw_score)
+    """
+    # Step 1: Calculate surprise percentage
+    surprise_pct = abs((eps_actual - eps_forecast) / eps_forecast) * 100
+    beat_miss = eps_actual > eps_forecast
+    
+    # Step 2: Create dynamically enriched EPS context based on surprise level
+    if beat_miss:
+        if surprise_pct >= 100:  # Massive beat (100%+)
+            numbers_text = f"The company delivered an extraordinary earnings beat with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a staggering {surprise_pct:.1f}% surprise. This exceptional performance demonstrates outstanding execution, remarkable operational excellence, and exceptional market outperformance that exceeded all expectations."
+        elif surprise_pct >= 50:  # Large beat (50-99%)
+            numbers_text = f"The company achieved a remarkable earnings beat with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing an impressive {surprise_pct:.1f}% surprise. This strong performance reflects excellent execution, robust operational results, and significant market outperformance."
+        elif surprise_pct >= 20:  # Solid beat (20-49%)
+            numbers_text = f"The company delivered a solid earnings beat with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This performance demonstrates good execution and positive operational results."
+        else:  # Modest beat (<20%)
+            numbers_text = f"The company slightly beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This modest outperformance shows steady execution."
+    else:
+        if surprise_pct >= 100:  # Massive miss (100%+)
+            numbers_text = f"The company experienced a devastating earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a catastrophic {surprise_pct:.1f}% shortfall. This severe underperformance reflects significant operational challenges, major execution issues, and concerning market headwinds."
+        elif surprise_pct >= 50:  # Large miss (50-99%)
+            numbers_text = f"The company reported a significant earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a substantial {surprise_pct:.1f}% shortfall. This disappointing performance reflects operational challenges and execution difficulties."
+        elif surprise_pct >= 20:  # Solid miss (20-49%)
+            numbers_text = f"The company missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This underperformance indicates some operational challenges."
+        else:  # Modest miss (<20%)
+            numbers_text = f"The company slightly missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This modest underperformance shows some execution challenges."
+    
+    # Step 3: Extract meaningful content sections (skip greetings and goodbyes)
+    words = transcript.split()
+    if len(words) > 200:
+        # Skip initial greetings and find the start of actual content
+        # Look for common greeting patterns and skip them
+        start_idx = 0
+        greeting_patterns = [
+            'good morning', 'good afternoon', 'good evening', 'welcome', 
+            'thank you', 'hello', 'hi', 'thank you for joining', 'operator',
+            'conference call', 'earnings call', 'quarterly call'
+        ]
+        
+        # Find the first meaningful content after greetings
+        for i, word in enumerate(words[:50]):  # Check first 50 words for greetings
+            if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in greeting_patterns):
+                start_idx = i + 3  # Skip the greeting phrase
+                break
+        
+        # Skip closing pleasantries and find the end of actual content
+        end_idx = len(words)
+        closing_patterns = [
+            'thank you', 'goodbye', 'good bye', 'have a good', 'that concludes',
+            'end of call', 'call is concluded', 'operator', 'questions'
+        ]
+        
+        # Find the last meaningful content before closing
+        for i in range(len(words) - 50, len(words)):
+            if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in closing_patterns):
+                end_idx = i
+                break
+        
+        # Extract first 100 words after greetings and last 100 words before closing
+        meaningful_words = words[start_idx:end_idx]
+        if len(meaningful_words) > 200:
+            transcript_extract = ' '.join(meaningful_words[:100] + meaningful_words[-100:])
+        else:
+            transcript_extract = ' '.join(meaningful_words)
+        
+        # Step 4: Extract additional financial sentences with key terminology
+        financial_sentences = []
+        sentences = transcript.split('.')
+        
+        # Financial terminology patterns
+        financial_patterns = [
+            # EPS and earnings terms
+            'eps', 'earnings per share', 'earnings', 'profit', 'income', 'revenue',
+            'beat', 'miss', 'exceed', 'outperform', 'underperform', 'surprise',
+            'forecast', 'guidance', 'expectations', 'target', 'projection',
+            
+            # Performance indicators
+            'growth', 'increase', 'decrease', 'rise', 'fall', 'up', 'down',
+            'strong', 'weak', 'robust', 'solid', 'challenging', 'difficult',
+            'outstanding', 'exceptional', 'disappointing', 'concerning',
+            
+            # Financial metrics
+            'margin', 'profitability', 'operational', 'execution', 'performance',
+            'results', 'quarterly', 'annual', 'year-over-year', 'sequential',
+            
+            # Numbers and percentages
+            'percent', '%', 'basis points', 'million', 'billion', 'thousand',
+            'dollar', '$', 'cents', 'share', 'shares'
+        ]
+        
+        # Sentiment-based patterns for more targeted extraction
+        positive_words = ['strong', 'exceed', 'outperform', 'growth', 'record', 'pleased', 
+                         'excellent', 'robust', 'solid', 'positive', 'improve', 'increase', 
+                         'rise', 'gain', 'success', 'momentum', 'expansion', 'outstanding', 
+                         'exceptional', 'impressive', 'deliver', 'beat', 'surpass', 'outpace']
+        
+        negative_words = ['challenge', 'difficult', 'disappoint', 'pressure', 'headwind', 
+                         'decline', 'weak', 'struggle', 'concern', 'risk', 'uncertain', 
+                         'volatile', 'decrease', 'fall', 'drop', 'miss', 'underperform', 
+                         'disappointing', 'concerning', 'struggle', 'headwinds', 'pressure']
+        
+        # Extract sentences containing financial terminology and sentiment
+        for sentence in sentences:
+            sentence_lower = sentence.lower().strip()
+            if len(sentence_lower) > 20:  # Skip very short sentences
+                # Check if sentence contains financial terminology OR sentiment words
+                has_financial = any(pattern in sentence_lower for pattern in financial_patterns)
+                has_positive = any(word in sentence_lower for word in positive_words)
+                has_negative = any(word in sentence_lower for word in negative_words)
+                
+                if has_financial or has_positive or has_negative:
+                    financial_sentences.append(sentence.strip())
+        
+        # Add top 5 most relevant financial sentences to the extract
+        if financial_sentences:
+            # Limit to top 5 sentences to avoid making extract too long
+            top_financial_sentences = financial_sentences[:5]
+            financial_text = ' '.join(top_financial_sentences)
+            
+            # Combine with the opening/closing extract
+            if len(transcript_extract.split()) + len(financial_text.split()) < 300:
+                transcript_extract = transcript_extract + ' ' + financial_text
+            else:
+                # If too long, prioritize financial sentences
+                transcript_extract = financial_text
+    else:
+        # For short transcripts, use the full text
+        transcript_extract = transcript
+    
+    # Step 5: Get embeddings and compute similarity
+    try:
+        embeddings = embed_func([transcript_extract, numbers_text], api_base, model)
+        transcript_embedding, numbers_embedding = embeddings
+        
+        cosine_sim = cosine(transcript_embedding, numbers_embedding)
+        
+        # Step 6: Apply surprise-level weighting
+        # Higher surprise = more weight to the comparison
+        # This increases differentiation for larger surprises
+        surprise_weight = min(2.0, max(0.5, surprise_pct / 50))  # Weight between 0.5x and 2.0x
+        
+        # Apply the weight to the similarity score
+        weighted_similarity = cosine_sim * surprise_weight
+        
+        # Ensure the weighted similarity doesn't exceed 1.0
+        weighted_similarity = min(1.0, weighted_similarity)
+        
+        nnw_score = 1.0 - weighted_similarity
+        
+        return cosine_sim, nnw_score
+    except Exception as e:
+        raise Exception(f"Failed to compute balanced NNW: {e}")
+
+
 def parse_float_safe(value):
     # try to parse a float, handle messy data
     if pd.isna(value):
@@ -143,8 +309,8 @@ def main():
         df = pd.read_csv(args.eps_csv)
         df = clean_cols(df)
         
-        # make sure we have the columns we need
-        required_cols = ['ticker', 'period', 'eps_actual', 'eps_forecast']
+        # make sure we have the columns we need - handle different column name formats
+        required_cols = ['eps_name', 'quarter', 'actual_eps', 'forecast_eps']
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
             print(f"Error: Missing required columns: {missing_cols}")
@@ -157,11 +323,11 @@ def main():
     # apply any filters
     if args.tickers:
         ticker_filter = [t.strip().upper() for t in args.tickers.split(',')]
-        df = df[df['ticker'].str.upper().isin(ticker_filter)]
+        df = df[df['eps_name'].str.upper().isin(ticker_filter)]
     
     if args.periods:
         period_filter = [p.strip() for p in args.periods.split(',')]
-        df = df[df['period'].str.strip().isin(period_filter)]
+        df = df[df['quarter'].astype(str).str.strip().isin(period_filter)]
     
     if df.empty:
         print("No data remaining after filtering")
@@ -174,12 +340,12 @@ def main():
     skipped = 0
     
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Computing NNW scores"):
-        ticker = str(row['ticker']).strip()
-        period = str(row['period']).strip()
+        ticker = str(row['eps_name']).strip()
+        period = str(row['quarter']).strip()
         
         # get the EPS numbers
-        eps_actual = parse_float_safe(row['eps_actual'])
-        eps_forecast = parse_float_safe(row['eps_forecast'])
+        eps_actual = parse_float_safe(row['actual_eps'])
+        eps_forecast = parse_float_safe(row['forecast_eps'])
         
         if eps_actual is None or eps_forecast is None:
             print(f"Warning: Skipping {ticker} {period} - invalid EPS values")
@@ -188,8 +354,8 @@ def main():
         
         # find the transcript file
         transcript_path = None
-        if 'transcript_path' in df.columns and pd.notna(row['transcript_path']):
-            candidate_path = str(row['transcript_path']).strip()
+        if 'filepath' in df.columns and pd.notna(row['filepath']):
+            candidate_path = str(row['filepath']).strip()
             if os.path.exists(candidate_path):
                 transcript_path = candidate_path
         
@@ -211,17 +377,12 @@ def main():
             skipped += 1
             continue
         
-        # create the numbers string for comparison
-        numbers_text = f"EPS actual: {eps_actual}; EPS forecast: {eps_forecast}"
-        
         try:
-            # get embeddings for both texts
-            embeddings = embed([transcript_text, numbers_text], args.api_base, args.model)
-            transcript_embedding, numbers_embedding = embeddings
-            
-            # calculate similarity and NNW score
-            cosine_sim = cosine(transcript_embedding, numbers_embedding)
-            nnw = 1.0 - cosine_sim
+            # use the new balanced NNW calculation with dynamic enrichment
+            cosine_sim, nnw = compute_balanced_nnw(
+                transcript_text, eps_actual, eps_forecast, 
+                embed, args.api_base, args.model
+            )
             
             # save the result
             results.append({
