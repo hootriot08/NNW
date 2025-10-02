@@ -11,13 +11,13 @@ from tqdm import tqdm
 
 
 def clean_cols(df):
-    """Standardize column names to lowercase and strip whitespace."""
+    """Clean up column names - lowercase and strip whitespace"""
     df.columns = df.columns.str.lower().str.strip()
     return df
 
 
 def find_transcript(ticker, period, transcripts_dir):
-    """Find the best matching transcript file for a given ticker and period."""
+    """Find transcript file for ticker/period - picks the biggest one if multiple matches"""
     transcripts_path = Path(transcripts_dir)
     if not transcripts_path.exists():
         return None
@@ -34,21 +34,21 @@ def find_transcript(ticker, period, transcripts_dir):
     if not candidates:
         return None
     
-    # Use the largest file if multiple matches found
+    # Just grab the biggest file if we have multiple
     return str(max(candidates, key=lambda x: x[1])[0])
 
 
 def read_and_trim_transcript(path, hint, max_chars):
-    """Read transcript file and clean it up for processing."""
+    """Read transcript and clean it up"""
     try:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
         
-        # Remove Q&A section if present
+        # Cut off Q&A if it exists
         if hint in text:
             text = text.split(hint)[0]
         
-        # Truncate if too long to avoid memory issues
+        # Trim if too long
         if len(text) > max_chars:
             text = text[:max_chars]
         
@@ -59,7 +59,7 @@ def read_and_trim_transcript(path, hint, max_chars):
 
 
 def embed(texts, api_base, model, max_retries=3):
-    """Get embeddings from LM Studio with retry logic."""
+    """Get embeddings from LM Studio - with retries because it's flaky"""
     for attempt in range(max_retries):
         try:
             response = requests.post(
@@ -78,16 +78,16 @@ def embed(texts, api_base, model, max_retries=3):
 
 
 def normalize_text(text):
-    """Normalize text for better embedding quality."""
+    """Clean up text for embeddings"""
     if not text:
         return ""
     
     text = text.lower()
     
-    # Remove thousands separators from numbers
+    # Fix number formatting
     text = re.sub(r'(\d),(\d{3})', r'\1\2', text)
     
-    # Standardize financial terms
+    # Make financial terms consistent
     text = re.sub(r'\bq(\d)\b', r'q\1', text)
     text = re.sub(r'\beps\b', 'eps', text)
     
@@ -95,7 +95,7 @@ def normalize_text(text):
 
 
 def create_rich_tokens(eps_actual, eps_forecast, sue=None):
-    """Create compact facts string for enhanced embeddings."""
+    """Create a compact summary string with key metrics"""
     delta_eps = eps_actual - eps_forecast
     
     if eps_forecast != 0:
@@ -111,7 +111,7 @@ def create_rich_tokens(eps_actual, eps_forecast, sue=None):
 
 
 def cosine(a, b):
-    """Calculate cosine similarity between two vectors."""
+    """Calculate cosine similarity"""
     a = np.array(a, dtype=np.float32)
     b = np.array(b, dtype=np.float32)
     denom = np.linalg.norm(a) * np.linalg.norm(b)
@@ -119,7 +119,7 @@ def cosine(a, b):
 
 
 def compute_sue(eps_actual, eps_forecast, eps_std):
-    """Calculate Standardized Unexpected Earnings (SUE)."""
+    """Calculate SUE (Standardized Unexpected Earnings)"""
     if eps_std == 0 or eps_std is None:
         return None
     
@@ -127,10 +127,10 @@ def compute_sue(eps_actual, eps_forecast, eps_std):
 
 
 def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
-    """Generate narrative using dollar delta and percentage surprise as fallback."""
-    TOL = 0.005  # Treat |EPS| < 0.5¢ as zero
-    D_CUTS = (0.05, 0.15, 0.30)   # Dollar thresholds
-    P_CUTS = (3.0, 10.0, 20.0)    # Percentage thresholds
+    """Generate narrative when we don't have SUE data"""
+    TOL = 0.005  # Anything under 0.5¢ is basically zero
+    D_CUTS = (0.05, 0.15, 0.30)   # Dollar cutoffs
+    P_CUTS = (3.0, 10.0, 20.0)    # Percentage cutoffs
 
     def sign_with_tol(x):
         if x > TOL: return 1
@@ -138,7 +138,7 @@ def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
         return 0
 
     def bucket_from_dollar(d):
-        """Categorize based on dollar delta."""
+        """Bucket based on dollar difference"""
         if d <= -D_CUTS[2]: return "very_large_miss"
         if d <= -D_CUTS[1]: return "strong_miss"
         if d <= -D_CUTS[0]: return "modest_miss"
@@ -148,7 +148,7 @@ def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
         return "very_large_beat"
 
     def bucket_from_percent(p):
-        """Categorize based on percentage surprise."""
+        """Bucket based on percentage change"""
         if p <= -P_CUTS[2]: return "very_large_miss"
         if p <= -P_CUTS[1]: return "strong_miss"
         if p <= -P_CUTS[0]: return "modest_miss"
@@ -162,26 +162,27 @@ def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
     s_act = sign_with_tol(eps_actual)
     s_fcst = sign_with_tol(eps_forecast)
 
-    # Handle exact/near-zero cases
+    # Both basically zero
     if s_act == 0 and s_fcst == 0:
         return ("slight_beat",
                 f"The company reported EPS of ${eps_actual:.2f} versus a forecast of ${eps_forecast:.2f}, "
                 f"meeting expectations exactly with no earnings surprise.")
 
-    # Handle zero-crossings (profit↔loss)
+    # Profit to loss
     if s_fcst > 0 and s_act <= 0:
         b = bucket_from_dollar(dollar_delta)
         return (b,
                 f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
                 f"an unexpected loss/zero outcome representing a {b.replace('_', ' ')} (${dollar_delta:.2f} swing).")
 
+    # Loss to profit
     if s_fcst < 0 and s_act >= 0:
         b = bucket_from_dollar(dollar_delta)
         return (b,
                 f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
                 f"returning to profitability/zero with a {b.replace('_', ' ')} (${dollar_delta:.2f} swing).")
 
-    # Handle both negative (loss→loss)
+    # Both negative (loss to loss)
     if s_fcst < 0 and s_act < 0:
         b = bucket_from_dollar(dollar_delta)
         narrower = abs(eps_actual) < abs(eps_forecast)
@@ -190,7 +191,7 @@ def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
                 f"The company reported a loss of ${eps_actual:.2f} vs. an expected loss of ${eps_forecast:.2f}, "
                 f"a {direction} and a {b.replace('_', ' ')} (${dollar_delta:.2f} change).")
 
-    # Handle both positive (profit→profit)
+    # Both positive (profit to profit)
     if abs(eps_forecast) <= 0.05:
         b = bucket_from_dollar(dollar_delta)
         verb = "beat" if dollar_delta >= 0 else "miss"
@@ -207,7 +208,7 @@ def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
                 f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
                 f"a {b.replace('_', ' ')} (${dollar_delta:.2f} {verb}, {sign}{pct:.1f}%).")
 
-    # Use percentage buckets for larger forecasts
+    # Use percentage for bigger numbers
     pct = (dollar_delta / abs(eps_forecast)) * 100.0
     b = bucket_from_percent(pct)
     verb = "beat" if pct >= 0 else "miss"
@@ -217,11 +218,11 @@ def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
             f"a {b.replace('_', ' ')} (${dollar_delta:.2f} {verb}, {sign}{pct:.1f}%).")
 
 def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: float):
-    """Generate narrative using SUE (Standardized Unexpected Earnings)."""
-    TOL = 0.005  # Treat |EPS| < 0.5¢ as zero
+    """Generate narrative using SUE"""
+    TOL = 0.005  # Anything under 0.5¢ is basically zero
 
     def bucket_from_sue(s):
-        """Categorize based on SUE value."""
+        """Bucket based on SUE value"""
         if s <= -3:
             return "very_large_miss"
         if -3 < s <= -2:
@@ -246,7 +247,7 @@ def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: fl
     s_actual = sign_with_tol(eps_actual)
     s_forecast = sign_with_tol(eps_forecast)
 
-    # Handle exact/near-zero cases
+    # Both basically zero
     if s_actual == 0 and s_forecast == 0:
         return (
             "inline",
@@ -254,7 +255,7 @@ def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: fl
             f"meeting expectations with no earnings surprise (SUE = {sue:.1f})."
         )
 
-    # Handle zero-crossings (profit↔loss)
+    # Profit to loss
     if s_forecast > 0 and s_actual <= 0:
         b = bucket_from_sue(sue)
         return (
@@ -263,6 +264,7 @@ def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: fl
             f"an unexpected loss/zero outcome representing a {b.replace('_', ' ')} (SUE = {sue:.1f})."
         )
 
+    # Loss to profit
     if s_forecast < 0 and s_actual >= 0:
         b = bucket_from_sue(sue)
         return (
@@ -271,7 +273,7 @@ def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: fl
             f"returning to profitability/zero with a {b.replace('_', ' ')} (SUE = {sue:.1f})."
         )
 
-    # Handle both negative (loss→loss)
+    # Both negative (loss to loss)
     if s_forecast < 0 and s_actual < 0:
         b = bucket_from_sue(sue)
         narrower = abs(eps_actual) < abs(eps_forecast)
@@ -288,7 +290,7 @@ def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: fl
                 f"a wider loss than expected and a {b.replace('_', ' ')} (SUE = {sue:.1f})."
             )
 
-    # 4) Both positive (profit→profit): standard beat/miss phrasing by SUE
+    # Both positive (profit to profit)
     b = bucket_from_sue(sue)
     if sue >= 0:
         # beats
@@ -330,19 +332,19 @@ def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: fl
         return b, text
 
 def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model, eps_std=None):
-    """Compute NNW score using transcript and earnings data."""
+    """Compute NNW score"""
     sue = compute_sue(eps_actual, eps_forecast, eps_std)
     
-    # Generate narrative text
+    # Get the narrative
     if sue is not None:
         bucket, numbers_text = get_sue_bucket_and_narrative(sue, eps_actual, eps_forecast)
     else:
         bucket, numbers_text = get_fallback_bucket_and_narrative(eps_actual, eps_forecast)
     
-    # Extract meaningful content from transcript
+    # Clean up the transcript
     words = transcript.split()
     if len(words) > 200:
-        # Skip greetings and find content start
+        # Skip the usual greeting stuff
         start_idx = 0
         greeting_patterns = [
             'good morning', 'good afternoon', 'good evening', 'welcome', 
@@ -355,7 +357,7 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
                 start_idx = i + 3
                 break
         
-        # Skip closing pleasantries
+        # Skip the ending stuff too
         end_idx = len(words)
         closing_patterns = [
             'thank you', 'goodbye', 'good bye', 'have a good', 'that concludes',
@@ -367,14 +369,14 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
                 end_idx = i
                 break
         
-        # Extract key content sections
+        # Get the good stuff
         meaningful_words = words[start_idx:end_idx]
         if len(meaningful_words) > 200:
             transcript_extract = ' '.join(meaningful_words[:100] + meaningful_words[-100:])
         else:
             transcript_extract = ' '.join(meaningful_words)
         
-        # Extract financial sentences
+        # Look for financial stuff
         financial_sentences = []
         sentences = transcript.split('.')
         
@@ -401,7 +403,7 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
                          'volatile', 'decrease', 'fall', 'drop', 'miss', 'underperform', 
                          'disappointing', 'concerning', 'struggle', 'headwinds', 'pressure']
         
-        # Find relevant financial sentences
+        # Grab the relevant sentences
         for sentence in sentences:
             sentence_lower = sentence.lower().strip()
             if len(sentence_lower) > 20:
@@ -412,7 +414,7 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
                 if has_financial or has_positive or has_negative:
                     financial_sentences.append(sentence.strip())
         
-        # Combine with financial sentences
+        # Mix it all together
         if financial_sentences:
             top_financial_sentences = financial_sentences[:5]
             financial_text = ' '.join(top_financial_sentences)
@@ -424,7 +426,7 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
     else:
         transcript_extract = transcript
     
-    # Compute embeddings and similarity
+    # Do the actual computation
     try:
         rich_tokens = create_rich_tokens(eps_actual, eps_forecast, sue)
         
@@ -449,7 +451,7 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
 
 
 def parse_float_safe(value):
-    """Safely parse float values, handling messy data."""
+    """Parse float values - handles the messy data"""
     if pd.isna(value):
         return None
     
@@ -466,7 +468,7 @@ def parse_float_safe(value):
 
 
 def main():
-    """Main function to run NNW analysis."""
+    """Main function"""
     parser = argparse.ArgumentParser(description="NNW score calculator")
     parser.add_argument("--eps_csv", default="data/eps_comparison.csv", 
                        help="EPS data file")
@@ -487,7 +489,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate input files
+    # Check if files exist
     if not os.path.exists(args.eps_csv):
         print(f"Error: EPS CSV file not found: {args.eps_csv}")
         sys.exit(1)
@@ -496,7 +498,7 @@ def main():
         print(f"Error: Transcripts directory not found: {args.transcripts_dir}")
         sys.exit(1)
     
-    # Load and validate data
+    # Load the data
     try:
         df = pd.read_csv(args.eps_csv)
         df = clean_cols(df)
@@ -508,7 +510,7 @@ def main():
             print(f"Available columns: {list(df.columns)}")
             sys.exit(1)
         
-        # Check for standard deviation column
+        # Look for std dev column
         eps_std_col = None
         possible_std_cols = ['eps_std', 'std_eps', 'standard_deviation', 'stdev', 'eps_stdev']
         for col in possible_std_cols:
@@ -524,7 +526,7 @@ def main():
         print(f"Error reading CSV: {e}")
         sys.exit(1)
     
-    # Apply filters
+    # Apply any filters
     if args.tickers:
         ticker_filter = [t.strip().upper() for t in args.tickers.split(',')]
         df = df[df['eps_name'].str.upper().isin(ticker_filter)]
@@ -539,7 +541,7 @@ def main():
     
     print(f"Processing {len(df)} rows...")
     
-    # Process each row
+    # Go through each row
     results = []
     skipped = 0
     
@@ -547,7 +549,7 @@ def main():
         ticker = str(row['eps_name']).strip()
         period = str(row['quarter']).strip()
         
-        # Parse EPS values
+        # Get the EPS numbers
         eps_actual = parse_float_safe(row['actual_eps'])
         eps_forecast = parse_float_safe(row['forecast_eps'])
         eps_std = parse_float_safe(row[eps_std_col]) if eps_std_col else None
@@ -557,7 +559,7 @@ def main():
             skipped += 1
             continue
         
-        # Find transcript file
+        # Find the transcript
         transcript_path = None
         if 'filepath' in df.columns and pd.notna(row['filepath']):
             candidate_path = str(row['filepath']).strip()
@@ -572,7 +574,7 @@ def main():
             skipped += 1
             continue
         
-        # Read transcript
+        # Read the transcript
         transcript_text = read_and_trim_transcript(
             transcript_path, args.qa_split_hint, args.max_chars
         )
@@ -583,7 +585,7 @@ def main():
             continue
         
         try:
-            # Compute NNW score
+            # Calculate the NNW score
             cosine_sim, nnw = compute_simple_nnw(
                 transcript_text, eps_actual, eps_forecast, 
                 embed, args.api_base, args.model, eps_std
@@ -608,7 +610,7 @@ def main():
             skipped += 1
             continue
     
-    # Save results
+    # Save everything
     if results:
         results_df = pd.DataFrame(results)
         results_df.to_csv(args.out_csv, index=False)
