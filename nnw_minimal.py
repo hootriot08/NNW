@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-NNW Score Calculator - compares earnings transcripts with EPS data
-"""
-
 import argparse
 import os
 import re
@@ -16,13 +11,13 @@ from tqdm import tqdm
 
 
 def clean_cols(df):
-    # make column names consistent
+    """Standardize column names to lowercase and strip whitespace."""
     df.columns = df.columns.str.lower().str.strip()
     return df
 
 
 def find_transcript(ticker, period, transcripts_dir):
-    # look for transcript files that match ticker and period
+    """Find the best matching transcript file for a given ticker and period."""
     transcripts_path = Path(transcripts_dir)
     if not transcripts_path.exists():
         return None
@@ -39,21 +34,21 @@ def find_transcript(ticker, period, transcripts_dir):
     if not candidates:
         return None
     
-    # pick the biggest file if there are multiple matches
+    # Use the largest file if multiple matches found
     return str(max(candidates, key=lambda x: x[1])[0])
 
 
 def read_and_trim_transcript(path, hint, max_chars):
-    # read transcript file and clean it up
+    """Read transcript file and clean it up for processing."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
         
-        # cut off at Q&A section if it exists
+        # Remove Q&A section if present
         if hint in text:
             text = text.split(hint)[0]
         
-        # limit length to avoid memory issues
+        # Truncate if too long to avoid memory issues
         if len(text) > max_chars:
             text = text[:max_chars]
         
@@ -64,7 +59,7 @@ def read_and_trim_transcript(path, hint, max_chars):
 
 
 def embed(texts, api_base, model, max_retries=3):
-    # get embeddings from LM Studio, with some retry logic
+    """Get embeddings from LM Studio with retry logic."""
     for attempt in range(max_retries):
         try:
             response = requests.post(
@@ -82,58 +77,272 @@ def embed(texts, api_base, model, max_retries=3):
             print(f"Embedding attempt {attempt + 1} failed: {e}, retrying...")
 
 
+def normalize_text(text):
+    """Normalize text for better embedding quality."""
+    if not text:
+        return ""
+    
+    text = text.lower()
+    
+    # Remove thousands separators from numbers
+    text = re.sub(r'(\d),(\d{3})', r'\1\2', text)
+    
+    # Standardize financial terms
+    text = re.sub(r'\bq(\d)\b', r'q\1', text)
+    text = re.sub(r'\beps\b', 'eps', text)
+    
+    return text.strip()
+
+
+def create_rich_tokens(eps_actual, eps_forecast, sue=None):
+    """Create compact facts string for enhanced embeddings."""
+    delta_eps = eps_actual - eps_forecast
+    
+    if eps_forecast != 0:
+        pct_change = (delta_eps / abs(eps_forecast)) * 100.0
+        pct_str = f"{pct_change:+.1f}"
+    else:
+        pct_str = "N/A"
+    
+    sue_str = f"{sue:+.1f}" if sue is not None else "N/A"
+    delta_str = f"{delta_eps:+.2f}"
+    
+    return f"| SUE={sue_str} | ΔEPS={delta_str} | %{pct_str} |"
+
+
 def cosine(a, b):
-    # calculate cosine similarity between two vectors
+    """Calculate cosine similarity between two vectors."""
     a = np.array(a, dtype=np.float32)
     b = np.array(b, dtype=np.float32)
     denom = np.linalg.norm(a) * np.linalg.norm(b)
     return float(np.dot(a, b) / denom) if denom > 0 else 0.0
 
 
-def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model):
-    """
-    Basic NNW calculation - just compares transcript to EPS context.
+def compute_sue(eps_actual, eps_forecast, eps_std):
+    """Calculate Standardized Unexpected Earnings (SUE)."""
+    if eps_std == 0 or eps_std is None:
+        return None
     
-    Args:
-        transcript: Full transcript text
-        eps_actual: Actual EPS value
-        eps_forecast: Forecast EPS value
-        embed_func: Function to get embeddings
-        api_base: API base URL
-        model: Model name
-    
-    Returns:
-        tuple: (cosine_similarity, nnw_score)
-    """
-    # calculate surprise percentage
-    surprise_pct = abs((eps_actual - eps_forecast) / eps_forecast) * 100
-    beat_miss = eps_actual > eps_forecast
-    
-    # create enriched EPS context with intensity-based language
-    if beat_miss:
-        if surprise_pct >= 100:  # Extraordinary beat (100%+)
-            numbers_text = f"The company delivered a blowout earnings performance with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a spectacular {surprise_pct:.1f}% surprise. This record-breaking, unprecedented performance demonstrates outstanding execution and exceptional market outperformance."
-        elif surprise_pct >= 50:  # Strong beat (50-99%)
-            numbers_text = f"The company outperformed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing an exceptional {surprise_pct:.1f}% surprise. This very strong performance was well ahead of expectations and demonstrates solid execution."
-        elif surprise_pct >= 20:  # Moderate beat (20-49%)
-            numbers_text = f"The company beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This solid performance was stronger than forecast and shows good execution."
-        else:  # Marginal beat (<20%)
-            numbers_text = f"The company slightly beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This narrow beat was in line but positive, showing steady execution."
+    return (eps_actual - eps_forecast) / eps_std
+
+
+def get_fallback_bucket_and_narrative(eps_actual: float, eps_forecast: float):
+    """Generate narrative using dollar delta and percentage surprise as fallback."""
+    TOL = 0.005  # Treat |EPS| < 0.5¢ as zero
+    D_CUTS = (0.05, 0.15, 0.30)   # Dollar thresholds
+    P_CUTS = (3.0, 10.0, 20.0)    # Percentage thresholds
+
+    def sign_with_tol(x):
+        if x > TOL: return 1
+        if x < -TOL: return -1
+        return 0
+
+    def bucket_from_dollar(d):
+        """Categorize based on dollar delta."""
+        if d <= -D_CUTS[2]: return "very_large_miss"
+        if d <= -D_CUTS[1]: return "strong_miss"
+        if d <= -D_CUTS[0]: return "modest_miss"
+        if -D_CUTS[0] < d < D_CUTS[0]: return "slight_beat" if d >= 0 else "slight_miss"
+        if d < D_CUTS[1]: return "modest_beat"
+        if d < D_CUTS[2]: return "strong_beat"
+        return "very_large_beat"
+
+    def bucket_from_percent(p):
+        """Categorize based on percentage surprise."""
+        if p <= -P_CUTS[2]: return "very_large_miss"
+        if p <= -P_CUTS[1]: return "strong_miss"
+        if p <= -P_CUTS[0]: return "modest_miss"
+        if -P_CUTS[0] < p < 0: return "slight_miss"
+        if 0 <= p < P_CUTS[0]: return "slight_beat"
+        if p < P_CUTS[1]: return "modest_beat"
+        if p < P_CUTS[2]: return "strong_beat"
+        return "very_large_beat"
+
+    dollar_delta = eps_actual - eps_forecast
+    s_act = sign_with_tol(eps_actual)
+    s_fcst = sign_with_tol(eps_forecast)
+
+    # Handle exact/near-zero cases
+    if s_act == 0 and s_fcst == 0:
+        return ("slight_beat",
+                f"The company reported EPS of ${eps_actual:.2f} versus a forecast of ${eps_forecast:.2f}, "
+                f"meeting expectations exactly with no earnings surprise.")
+
+    # Handle zero-crossings (profit↔loss)
+    if s_fcst > 0 and s_act <= 0:
+        b = bucket_from_dollar(dollar_delta)
+        return (b,
+                f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+                f"an unexpected loss/zero outcome representing a {b.replace('_', ' ')} (${dollar_delta:.2f} swing).")
+
+    if s_fcst < 0 and s_act >= 0:
+        b = bucket_from_dollar(dollar_delta)
+        return (b,
+                f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+                f"returning to profitability/zero with a {b.replace('_', ' ')} (${dollar_delta:.2f} swing).")
+
+    # Handle both negative (loss→loss)
+    if s_fcst < 0 and s_act < 0:
+        b = bucket_from_dollar(dollar_delta)
+        narrower = abs(eps_actual) < abs(eps_forecast)
+        direction = "narrower loss than expected" if narrower else "wider loss than expected"
+        return (b,
+                f"The company reported a loss of ${eps_actual:.2f} vs. an expected loss of ${eps_forecast:.2f}, "
+                f"a {direction} and a {b.replace('_', ' ')} (${dollar_delta:.2f} change).")
+
+    # Handle both positive (profit→profit)
+    if abs(eps_forecast) <= 0.05:
+        b = bucket_from_dollar(dollar_delta)
+        verb = "beat" if dollar_delta >= 0 else "miss"
+        return (b,
+                f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+                f"a {b.replace('_', ' ')} (${dollar_delta:.2f} {verb}).")
+
+    if 0.05 < abs(eps_forecast) < 0.20:
+        pct = (dollar_delta / abs(eps_forecast)) * 100.0
+        b = bucket_from_dollar(dollar_delta)
+        verb = "beat" if dollar_delta >= 0 else "miss"
+        sign = "+" if pct >= 0 else ""
+        return (b,
+                f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+                f"a {b.replace('_', ' ')} (${dollar_delta:.2f} {verb}, {sign}{pct:.1f}%).")
+
+    # Use percentage buckets for larger forecasts
+    pct = (dollar_delta / abs(eps_forecast)) * 100.0
+    b = bucket_from_percent(pct)
+    verb = "beat" if pct >= 0 else "miss"
+    sign = "+" if pct >= 0 else ""
+    return (b,
+            f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+            f"a {b.replace('_', ' ')} (${dollar_delta:.2f} {verb}, {sign}{pct:.1f}%).")
+
+def get_sue_bucket_and_narrative(sue: float, eps_actual: float, eps_forecast: float):
+    """Generate narrative using SUE (Standardized Unexpected Earnings)."""
+    TOL = 0.005  # Treat |EPS| < 0.5¢ as zero
+
+    def bucket_from_sue(s):
+        """Categorize based on SUE value."""
+        if s <= -3:
+            return "very_large_miss"
+        if -3 < s <= -2:
+            return "strong_miss"
+        if -2 < s <= -1:
+            return "modest_miss"
+        if -1 < s < 0:
+            return "slight_miss"
+        if 0 <= s < 1:
+            return "slight_beat"
+        if 1 <= s < 2:
+            return "modest_beat"
+        if 2 <= s < 3:
+            return "strong_beat"
+        return "very_large_beat"
+
+    def sign_with_tol(x):
+        if x > TOL: return 1
+        if x < -TOL: return -1
+        return 0
+
+    s_actual = sign_with_tol(eps_actual)
+    s_forecast = sign_with_tol(eps_forecast)
+
+    # Handle exact/near-zero cases
+    if s_actual == 0 and s_forecast == 0:
+        return (
+            "inline",
+            f"The company reported EPS of ${eps_actual:.2f} versus a forecast of ${eps_forecast:.2f}, "
+            f"meeting expectations with no earnings surprise (SUE = {sue:.1f})."
+        )
+
+    # Handle zero-crossings (profit↔loss)
+    if s_forecast > 0 and s_actual <= 0:
+        b = bucket_from_sue(sue)
+        return (
+            b,
+            f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+            f"an unexpected loss/zero outcome representing a {b.replace('_', ' ')} (SUE = {sue:.1f})."
+        )
+
+    if s_forecast < 0 and s_actual >= 0:
+        b = bucket_from_sue(sue)
+        return (
+            b,
+            f"The company reported EPS of ${eps_actual:.2f} vs. ${eps_forecast:.2f} forecast, "
+            f"returning to profitability/zero with a {b.replace('_', ' ')} (SUE = {sue:.1f})."
+        )
+
+    # Handle both negative (loss→loss)
+    if s_forecast < 0 and s_actual < 0:
+        b = bucket_from_sue(sue)
+        narrower = abs(eps_actual) < abs(eps_forecast)
+        if sue >= 0:
+            return (
+                b,
+                f"The company reported a loss of ${eps_actual:.2f} vs. an expected loss of ${eps_forecast:.2f}, "
+                f"a narrower loss than expected and a {b.replace('_', ' ')} (SUE = {sue:.1f})."
+            )
+        else:
+            return (
+                b,
+                f"The company reported a loss of ${eps_actual:.2f} vs. an expected loss of ${eps_forecast:.2f}, "
+                f"a wider loss than expected and a {b.replace('_', ' ')} (SUE = {sue:.1f})."
+            )
+
+    # 4) Both positive (profit→profit): standard beat/miss phrasing by SUE
+    b = bucket_from_sue(sue)
+    if sue >= 0:
+        # beats
+        if b == "slight_beat":
+            text = (f"The company reported EPS of ${eps_actual:.2f} against a forecast of ${eps_forecast:.2f}, "
+                    f"a slight positive surprise (SUE = {sue:.1f}). This narrow beat indicates performance "
+                    f"was essentially in line with analyst projections, reflecting steady execution.")
+        elif b == "modest_beat":
+            text = (f"The company reported EPS of ${eps_actual:.2f} versus a forecast of ${eps_forecast:.2f}, "
+                    f"a modest positive surprise (SUE = {sue:.1f}). This outcome signals slightly stronger "
+                    f"operations and efficiency than analysts had anticipated.")
+        elif b == "strong_beat":
+            text = (f"The company posted EPS of ${eps_actual:.2f} versus expectations of ${eps_forecast:.2f}, "
+                    f"a strong positive surprise (SUE = {sue:.1f}). This upside outcome demonstrates materially "
+                    f"better-than-expected profitability and underscores robust demand.")
+        else:  # very_large_beat
+            text = (f"The company achieved EPS of ${eps_actual:.2f} compared to the ${eps_forecast:.2f} consensus, "
+                    f"a very large positive surprise (SUE = {sue:.1f}). This extraordinary deviation from forecasts "
+                    f"reflects exceptional performance and remarkable earnings momentum.")
+        return b, text
     else:
-        if surprise_pct >= 100:  # Severe miss (100%+)
-            numbers_text = f"The company experienced a collapse in earnings with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a disastrous {surprise_pct:.1f}% shortfall. This major earnings shortfall reflects crippling operational challenges and severe market headwinds."
-        elif surprise_pct >= 50:  # Large miss (50-99%)
-            numbers_text = f"The company reported a sharp earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This disappointing earnings performance was well below expectations and reflects significant operational challenges."
-        elif surprise_pct >= 20:  # Moderate miss (20-49%)
-            numbers_text = f"The company missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This earnings miss fell short of expectations and shows weaker than expected performance."
-        else:  # Marginal miss (<20%)
-            numbers_text = f"The company slightly missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This narrow shortfall was just under expectations but shows some execution challenges."
+        # misses
+        if b == "slight_miss":
+            text = (f"The company reported EPS of ${eps_actual:.2f} versus the ${eps_forecast:.2f} forecast, "
+                    f"a slight negative surprise (SUE = {sue:.1f}). This narrow miss suggests results were "
+                    f"effectively in line with consensus, with only minor execution gaps.")
+        elif b == "modest_miss":
+            text = (f"The company delivered EPS of ${eps_actual:.2f} versus the ${eps_forecast:.2f} estimate, "
+                    f"a modest negative surprise (SUE = {sue:.1f}). This outcome indicates somewhat weaker results "
+                    f"than analysts had projected, reflecting softer execution.")
+        elif b == "strong_miss":
+            text = (f"The company posted EPS of ${eps_actual:.2f} versus expectations of ${eps_forecast:.2f}, "
+                    f"a strong negative surprise (SUE = {sue:.1f}). This degree of underperformance highlights "
+                    f"materially weaker-than-expected results.")
+        else:  # very_large_miss
+            text = (f"The company reported EPS of ${eps_actual:.2f} compared to consensus of ${eps_forecast:.2f}, "
+                    f"a very large negative surprise (SUE = {sue:.1f}). This severe shortfall signals extraordinary "
+                    f"deviation from expectations, likely tied to significant operational challenges or shocks.")
+        return b, text
+
+def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model, eps_std=None):
+    """Compute NNW score using transcript and earnings data."""
+    sue = compute_sue(eps_actual, eps_forecast, eps_std)
     
-    # extract meaningful content (skip greetings and goodbyes)
+    # Generate narrative text
+    if sue is not None:
+        bucket, numbers_text = get_sue_bucket_and_narrative(sue, eps_actual, eps_forecast)
+    else:
+        bucket, numbers_text = get_fallback_bucket_and_narrative(eps_actual, eps_forecast)
+    
+    # Extract meaningful content from transcript
     words = transcript.split()
     if len(words) > 200:
-        # Skip initial greetings and find the start of actual content
-        # Look for common greeting patterns and skip them
+        # Skip greetings and find content start
         start_idx = 0
         greeting_patterns = [
             'good morning', 'good afternoon', 'good evening', 'welcome', 
@@ -141,58 +350,47 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
             'conference call', 'earnings call', 'quarterly call'
         ]
         
-        # find where actual content starts
-        for i, word in enumerate(words[:50]):  # Check first 50 words for greetings
+        for i, word in enumerate(words[:50]):
             if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in greeting_patterns):
-                start_idx = i + 3  # Skip the greeting phrase
+                start_idx = i + 3
                 break
         
-        # Skip closing pleasantries and find the end of actual content
+        # Skip closing pleasantries
         end_idx = len(words)
         closing_patterns = [
             'thank you', 'goodbye', 'good bye', 'have a good', 'that concludes',
             'end of call', 'call is concluded', 'operator', 'questions'
         ]
         
-        # find where content ends
         for i in range(len(words) - 50, len(words)):
             if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in closing_patterns):
                 end_idx = i
                 break
         
-        # Extract first 100 words after greetings and last 100 words before closing
+        # Extract key content sections
         meaningful_words = words[start_idx:end_idx]
         if len(meaningful_words) > 200:
             transcript_extract = ' '.join(meaningful_words[:100] + meaningful_words[-100:])
         else:
             transcript_extract = ' '.join(meaningful_words)
         
-        # extract financial sentences with key terms
+        # Extract financial sentences
         financial_sentences = []
         sentences = transcript.split('.')
         
-        # financial terms to look for
         financial_patterns = [
-            # EPS and earnings terms
             'eps', 'earnings per share', 'earnings', 'profit', 'income', 'revenue',
             'beat', 'miss', 'exceed', 'outperform', 'underperform', 'surprise',
             'forecast', 'guidance', 'expectations', 'target', 'projection',
-            
-            # Performance indicators
             'growth', 'increase', 'decrease', 'rise', 'fall', 'up', 'down',
             'strong', 'weak', 'robust', 'solid', 'challenging', 'difficult',
             'outstanding', 'exceptional', 'disappointing', 'concerning',
-            
-            # Financial metrics
             'margin', 'profitability', 'operational', 'execution', 'performance',
             'results', 'quarterly', 'annual', 'year-over-year', 'sequential',
-            
-            # Numbers and percentages
             'percent', '%', 'basis points', 'million', 'billion', 'thousand',
             'dollar', '$', 'cents', 'share', 'shares'
         ]
         
-        # sentiment words to look for
         positive_words = ['strong', 'exceed', 'outperform', 'growth', 'record', 'pleased', 
                          'excellent', 'robust', 'solid', 'positive', 'improve', 'increase', 
                          'rise', 'gain', 'success', 'momentum', 'expansion', 'outstanding', 
@@ -203,11 +401,10 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
                          'volatile', 'decrease', 'fall', 'drop', 'miss', 'underperform', 
                          'disappointing', 'concerning', 'struggle', 'headwinds', 'pressure']
         
-        # Extract sentences containing financial terminology and sentiment
+        # Find relevant financial sentences
         for sentence in sentences:
             sentence_lower = sentence.lower().strip()
-            if len(sentence_lower) > 20:  # Skip very short sentences
-                # Check if sentence contains financial terminology OR sentiment words
+            if len(sentence_lower) > 20:
                 has_financial = any(pattern in sentence_lower for pattern in financial_patterns)
                 has_positive = any(word in sentence_lower for word in positive_words)
                 has_negative = any(word in sentence_lower for word in negative_words)
@@ -215,30 +412,35 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
                 if has_financial or has_positive or has_negative:
                     financial_sentences.append(sentence.strip())
         
-        # Add top 5 most relevant financial sentences to the extract
+        # Combine with financial sentences
         if financial_sentences:
-            # Limit to top 5 sentences to avoid making extract too long
             top_financial_sentences = financial_sentences[:5]
             financial_text = ' '.join(top_financial_sentences)
             
-            # Combine with the opening/closing extract
             if len(transcript_extract.split()) + len(financial_text.split()) < 300:
                 transcript_extract = transcript_extract + ' ' + financial_text
             else:
-                # If too long, prioritize financial sentences
                 transcript_extract = financial_text
     else:
-        # For short transcripts, use the full text
         transcript_extract = transcript
     
-    # get embeddings and compute similarity
+    # Compute embeddings and similarity
     try:
-        embeddings = embed_func([transcript_extract, numbers_text], api_base, model)
+        rich_tokens = create_rich_tokens(eps_actual, eps_forecast, sue)
+        
+        transcript_normalized = normalize_text(transcript_extract)
+        numbers_normalized = normalize_text(numbers_text)
+        
+        transcript_enhanced = f"{transcript_normalized} {rich_tokens}"
+        numbers_enhanced = f"{numbers_normalized} {rich_tokens}"
+        
+        embeddings = embed_func([transcript_enhanced, numbers_enhanced], api_base, model)
         transcript_embedding, numbers_embedding = embeddings
         
-        cosine_sim = cosine(transcript_embedding, numbers_embedding)
+        transcript_embedding = np.array(transcript_embedding, dtype=np.float32)
+        numbers_embedding = np.array(numbers_embedding, dtype=np.float32)
         
-        # Basic NNW calculation
+        cosine_sim = cosine(transcript_embedding, numbers_embedding)
         nnw_score = 1.0 - cosine_sim
         
         return cosine_sim, nnw_score
@@ -247,7 +449,7 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
 
 
 def parse_float_safe(value):
-    # try to parse a float, handle messy data
+    """Safely parse float values, handling messy data."""
     if pd.isna(value):
         return None
     
@@ -255,7 +457,6 @@ def parse_float_safe(value):
     if not str_value:
         return None
     
-    # clean up commas and spaces
     str_value = re.sub(r'[,\s]+', '', str_value)
     
     try:
@@ -265,16 +466,17 @@ def parse_float_safe(value):
 
 
 def main():
+    """Main function to run NNW analysis."""
     parser = argparse.ArgumentParser(description="NNW score calculator")
     parser.add_argument("--eps_csv", default="data/eps_comparison.csv", 
                        help="EPS data file")
     parser.add_argument("--transcripts_dir", default="transcripts", 
-                       help="Where the transcript files are")
+                       help="Transcript files directory")
     parser.add_argument("--out_csv", default="nnw_output.csv", 
                        help="Output file")
     parser.add_argument("--tickers", help="Filter by tickers (comma separated)")
     parser.add_argument("--periods", help="Filter by periods (comma separated)")
-    parser.add_argument("--model", default="bge-small-en-v1.5", 
+    parser.add_argument("--model", default="text-embedding-bge-m3", 
                        help="LM Studio model")
     parser.add_argument("--api_base", default="http://localhost:1234/v1", 
                        help="LM Studio API URL")
@@ -285,7 +487,7 @@ def main():
     
     args = parser.parse_args()
     
-    # check if files exist
+    # Validate input files
     if not os.path.exists(args.eps_csv):
         print(f"Error: EPS CSV file not found: {args.eps_csv}")
         sys.exit(1)
@@ -294,23 +496,35 @@ def main():
         print(f"Error: Transcripts directory not found: {args.transcripts_dir}")
         sys.exit(1)
     
-    # load the data
+    # Load and validate data
     try:
         df = pd.read_csv(args.eps_csv)
         df = clean_cols(df)
         
-        # make sure we have the columns we need - handle different column name formats
         required_cols = ['eps_name', 'quarter', 'actual_eps', 'forecast_eps']
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
             print(f"Error: Missing required columns: {missing_cols}")
             print(f"Available columns: {list(df.columns)}")
             sys.exit(1)
+        
+        # Check for standard deviation column
+        eps_std_col = None
+        possible_std_cols = ['eps_std', 'std_eps', 'standard_deviation', 'stdev', 'eps_stdev']
+        for col in possible_std_cols:
+            if col in df.columns:
+                eps_std_col = col
+                break
+        
+        if eps_std_col:
+            print(f"Found standard deviation column: {eps_std_col}")
+        else:
+            print("Warning: No standard deviation column found. SUE calculation will use fallback")
     except Exception as e:
         print(f"Error reading CSV: {e}")
         sys.exit(1)
     
-    # apply any filters
+    # Apply filters
     if args.tickers:
         ticker_filter = [t.strip().upper() for t in args.tickers.split(',')]
         df = df[df['eps_name'].str.upper().isin(ticker_filter)]
@@ -325,7 +539,7 @@ def main():
     
     print(f"Processing {len(df)} rows...")
     
-    # go through each row
+    # Process each row
     results = []
     skipped = 0
     
@@ -333,16 +547,17 @@ def main():
         ticker = str(row['eps_name']).strip()
         period = str(row['quarter']).strip()
         
-        # get the EPS numbers
+        # Parse EPS values
         eps_actual = parse_float_safe(row['actual_eps'])
         eps_forecast = parse_float_safe(row['forecast_eps'])
+        eps_std = parse_float_safe(row[eps_std_col]) if eps_std_col else None
         
         if eps_actual is None or eps_forecast is None:
             print(f"Warning: Skipping {ticker} {period} - invalid EPS values")
             skipped += 1
             continue
         
-        # find the transcript file
+        # Find transcript file
         transcript_path = None
         if 'filepath' in df.columns and pd.notna(row['filepath']):
             candidate_path = str(row['filepath']).strip()
@@ -357,7 +572,7 @@ def main():
             skipped += 1
             continue
         
-        # read the transcript
+        # Read transcript
         transcript_text = read_and_trim_transcript(
             transcript_path, args.qa_split_hint, args.max_chars
         )
@@ -368,18 +583,21 @@ def main():
             continue
         
         try:
-            # compute NNW score
+            # Compute NNW score
             cosine_sim, nnw = compute_simple_nnw(
                 transcript_text, eps_actual, eps_forecast, 
-                embed, args.api_base, args.model
+                embed, args.api_base, args.model, eps_std
             )
             
-            # save the result
+            sue = compute_sue(eps_actual, eps_forecast, eps_std)
+            
             results.append({
                 'ticker': ticker,
                 'period': period,
                 'eps_actual': eps_actual,
                 'eps_forecast': eps_forecast,
+                'eps_std': eps_std,
+                'sue': sue,
                 'transcript_path': transcript_path,
                 'cosine': cosine_sim,
                 'nnw': nnw
@@ -390,13 +608,12 @@ def main():
             skipped += 1
             continue
     
-    # save results
+    # Save results
     if results:
         results_df = pd.DataFrame(results)
         results_df.to_csv(args.out_csv, index=False)
         print(f"\nResults written to {args.out_csv}")
         
-        # show summary
         processed = len(results)
         print(f"\nProcessed: {processed} | Skipped: {skipped}")
         
