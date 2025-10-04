@@ -111,23 +111,27 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
     
     # create enriched EPS context with intensity-based language
     if beat_miss:
-        if surprise_pct >= 100:  # Extraordinary beat (100%+)
-            numbers_text = f"The company delivered a blowout earnings performance with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a spectacular {surprise_pct:.1f}% surprise. This record-breaking, unprecedented performance demonstrates outstanding execution and exceptional market outperformance."
-        elif surprise_pct >= 50:  # Strong beat (50-99%)
-            numbers_text = f"The company outperformed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing an exceptional {surprise_pct:.1f}% surprise. This very strong performance was well ahead of expectations and demonstrates solid execution."
-        elif surprise_pct >= 20:  # Moderate beat (20-49%)
-            numbers_text = f"The company beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This solid performance was stronger than forecast and shows good execution."
-        else:  # Marginal beat (<20%)
-            numbers_text = f"The company slightly beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This narrow beat was in line but positive, showing steady execution."
+        if surprise_pct >= 50:  # Extraordinary beat (50%+)
+            numbers_text = f"The company delivered a standout earnings performance with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a remarkable {surprise_pct:.1f}% surprise. This exceptional outperformance reflects strong execution, robust demand, and disciplined cost control."
+        elif surprise_pct >= 20:  # Strong beat (20-49%)
+            numbers_text = f"The company outperformed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a solid {surprise_pct:.1f}% surprise. This strong result highlights meaningful operational momentum and better-than-anticipated fundamentals."
+        elif surprise_pct >= 5:  # Moderate beat (5-19%)
+            numbers_text = f"The company beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% surprise. This moderate upside indicates healthy underlying performance and stable execution."
+        elif surprise_pct >= 2:  # Narrow beat (2-4%)
+            numbers_text = f"The company slightly beat expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a modest {surprise_pct:.1f}% surprise. This mild beat suggests consistent delivery in line with management guidance."
+        else:  # In line (<2%)
+            numbers_text = f"The company reported EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, remaining essentially in line with expectations. Performance was steady and reflects predictable, disciplined operations."
     else:
-        if surprise_pct >= 100:  # Severe miss (100%+)
-            numbers_text = f"The company experienced a collapse in earnings with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a disastrous {surprise_pct:.1f}% shortfall. This major earnings shortfall reflects crippling operational challenges and severe market headwinds."
-        elif surprise_pct >= 50:  # Large miss (50-99%)
-            numbers_text = f"The company reported a sharp earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This disappointing earnings performance was well below expectations and reflects significant operational challenges."
-        elif surprise_pct >= 20:  # Moderate miss (20-49%)
-            numbers_text = f"The company missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This earnings miss fell short of expectations and shows weaker than expected performance."
-        else:  # Marginal miss (<20%)
-            numbers_text = f"The company slightly missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This narrow shortfall was just under expectations but shows some execution challenges."
+        if surprise_pct >= 50:  # Severe miss (50%+)
+            numbers_text = f"The company reported a substantial earnings shortfall with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a steep {surprise_pct:.1f}% miss. This significant underperformance reflects material headwinds and operational challenges during the quarter."
+        elif surprise_pct >= 20:  # Large miss (20-49%)
+            numbers_text = f"The company reported a notable earnings miss with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This downside indicates pressure on margins or revenue softness relative to expectations."
+        elif surprise_pct >= 5:  # Moderate miss (5-19%)
+            numbers_text = f"The company missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a {surprise_pct:.1f}% shortfall. This moderate miss suggests weaker-than-expected performance in select areas but not a structural deterioration."
+        elif surprise_pct >= 2:  # Narrow miss (2-4%)
+            numbers_text = f"The company slightly missed expectations with EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, representing a small {surprise_pct:.1f}% shortfall. This marginal miss is minor and largely within the range of normal variability."
+        else:  # In line (<2%)
+            numbers_text = f"The company reported EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, essentially in line with expectations. Performance was consistent and reflects stable operational execution."
     
     # extract meaningful content (skip greetings and goodbyes)
     words = transcript.split()
