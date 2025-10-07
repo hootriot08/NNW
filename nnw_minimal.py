@@ -43,6 +43,60 @@ def find_transcript(ticker, period, transcripts_dir):
     return str(max(candidates, key=lambda x: x[1])[0])
 
 
+def parse_transcript_sections(path, qa_hint, max_chars):
+    """
+    Parse transcript into remarks and Q&A sections.
+    
+    Returns:
+        tuple: (remarks_text, qa_text, has_qa_section)
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        
+        # Check if Q&A section exists
+        qa_section_markers = [
+            "Questions and Answers",
+            "Q&A",
+            "Question and Answer",
+            "Questions & Answers"
+        ]
+        
+        has_qa_section = False
+        qa_start_idx = -1
+        
+        for marker in qa_section_markers:
+            if marker in text:
+                qa_start_idx = text.find(marker)
+                has_qa_section = True
+                break
+        
+        if has_qa_section:
+            # Split into remarks and Q&A sections
+            remarks_text = text[:qa_start_idx].strip()
+            qa_text = text[qa_start_idx:].strip()
+            
+            # Limit length to avoid memory issues
+            if len(remarks_text) > max_chars:
+                remarks_text = remarks_text[:max_chars]
+            if len(qa_text) > max_chars:
+                qa_text = qa_text[:max_chars]
+        else:
+            # No Q&A section found, use entire transcript as remarks
+            remarks_text = text
+            qa_text = ""
+            
+            # Limit length to avoid memory issues
+            if len(remarks_text) > max_chars:
+                remarks_text = remarks_text[:max_chars]
+        
+        return remarks_text.strip(), qa_text.strip(), has_qa_section
+        
+    except Exception as e:
+        print(f"Warning: Could not read transcript {path}: {e}")
+        return "", "", False
+
+
 def read_and_trim_transcript(path, hint, max_chars):
     # read transcript file and clean it up
     try:
@@ -90,20 +144,24 @@ def cosine(a, b):
     return float(np.dot(a, b) / denom) if denom > 0 else 0.0
 
 
-def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model):
+def compute_enhanced_nnw(remarks_text, qa_text, has_qa_section, eps_actual, eps_forecast, embed_func, api_base, model, prepared_weight=0.7, qa_weight=0.3):
     """
-    Basic NNW calculation - just compares transcript to EPS context.
+    Enhanced NNW calculation that considers both prepared remarks and Q&A sections.
     
     Args:
-        transcript: Full transcript text
+        remarks_text: Prepared remarks section text
+        qa_text: Q&A section text (empty if no Q&A section)
+        has_qa_section: Boolean indicating if Q&A section exists
         eps_actual: Actual EPS value
         eps_forecast: Forecast EPS value
         embed_func: Function to get embeddings
         api_base: API base URL
         model: Model name
+        prepared_weight: Weight for prepared remarks (default 0.7)
+        qa_weight: Weight for Q&A section (default 0.3)
     
     Returns:
-        tuple: (cosine_similarity, nnw_score)
+        tuple: (cosine_similarity_prepared, cosine_similarity_qa, nnw_final, has_qa_section)
     """
     # calculate surprise - use dollar delta for small EPS values to avoid crazy percentages
     eps_threshold = 0.10  # Use dollar delta for EPS < $0.10
@@ -172,121 +230,168 @@ def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_bas
             else:  # In line (<2%)
                 numbers_text = f"The company reported EPS of ${eps_actual:.2f} compared to forecast of ${eps_forecast:.2f}, essentially in line with expectations. Performance was consistent and reflects stable operational execution."
 
-    # extract meaningful content (skip greetings and goodbyes)
-    words = transcript.split()
-    if len(words) > 200:
-        # Skip initial greetings and find the start of actual content
-        # Look for common greeting patterns and skip them
-        start_idx = 0
-        greeting_patterns = [
-            'good morning', 'good afternoon', 'good evening', 'welcome', 
-            'thank you', 'hello', 'hi', 'thank you for joining', 'operator',
-            'conference call', 'earnings call', 'quarterly call'
-        ]
-        
-        # find where actual content starts
-        for i, word in enumerate(words[:50]):  # Check first 50 words for greetings
-            if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in greeting_patterns):
-                start_idx = i + 3  # Skip the greeting phrase
-                break
-        
-        # Skip closing pleasantries and find the end of actual content
-        end_idx = len(words)
-        closing_patterns = [
-            'thank you', 'goodbye', 'good bye', 'have a good', 'that concludes',
-            'end of call', 'call is concluded', 'operator', 'questions'
-        ]
-        
-        # find where content ends
-        for i in range(len(words) - 50, len(words)):
-            if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in closing_patterns):
-                end_idx = i
-                break
-        
-        # Extract first 100 words after greetings and last 100 words before closing
-        meaningful_words = words[start_idx:end_idx]
-        if len(meaningful_words) > 200:
-            transcript_extract = ' '.join(meaningful_words[:100] + meaningful_words[-100:])
-        else:
-            transcript_extract = ' '.join(meaningful_words)
-        
-        # extract financial sentences with key terms
-        financial_sentences = []
-        sentences = transcript.split('.')
-        
-        # financial terms to look for
-        financial_patterns = [
-            # EPS and earnings terms
-            'eps', 'earnings per share', 'earnings', 'profit', 'income', 'revenue',
-            'beat', 'miss', 'exceed', 'outperform', 'underperform', 'surprise',
-            'forecast', 'guidance', 'expectations', 'target', 'projection',
+    def extract_meaningful_content(text):
+        """Extract meaningful content from transcript text, skipping greetings and goodbyes."""
+        words = text.split()
+        if len(words) > 200:
+            # Skip initial greetings and find the start of actual content
+            start_idx = 0
+            greeting_patterns = [
+                'good morning', 'good afternoon', 'good evening', 'welcome', 
+                'thank you', 'hello', 'hi', 'thank you for joining', 'operator',
+                'conference call', 'earnings call', 'quarterly call'
+            ]
             
-            # Performance indicators
-            'growth', 'increase', 'decrease', 'rise', 'fall', 'up', 'down',
-            'strong', 'weak', 'robust', 'solid', 'challenging', 'difficult',
-            'outstanding', 'exceptional', 'disappointing', 'concerning',
+            # find where actual content starts
+            for i, word in enumerate(words[:50]):  # Check first 50 words for greetings
+                if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in greeting_patterns):
+                    start_idx = i + 3  # Skip the greeting phrase
+                    break
             
-            # Financial metrics
-            'margin', 'profitability', 'operational', 'execution', 'performance',
-            'results', 'quarterly', 'annual', 'year-over-year', 'sequential',
+            # Skip closing pleasantries and find the end of actual content
+            end_idx = len(words)
+            closing_patterns = [
+                'thank you', 'goodbye', 'good bye', 'have a good', 'that concludes',
+                'end of call', 'call is concluded', 'operator', 'questions'
+            ]
             
-            # Numbers and percentages
-            'percent', '%', 'basis points', 'million', 'billion', 'thousand',
-            'dollar', '$', 'cents', 'share', 'shares'
-        ]
-        
-        # sentiment words to look for
-        positive_words = ['strong', 'exceed', 'outperform', 'growth', 'record', 'pleased', 
-                         'excellent', 'robust', 'solid', 'positive', 'improve', 'increase', 
-                         'rise', 'gain', 'success', 'momentum', 'expansion', 'outstanding', 
-                         'exceptional', 'impressive', 'deliver', 'beat', 'surpass', 'outpace']
-        
-        negative_words = ['challenge', 'difficult', 'disappoint', 'pressure', 'headwind', 
-                         'decline', 'weak', 'struggle', 'concern', 'risk', 'uncertain', 
-                         'volatile', 'decrease', 'fall', 'drop', 'miss', 'underperform', 
-                         'disappointing', 'concerning', 'struggle', 'headwinds', 'pressure']
-        
-        # Extract sentences containing financial terminology and sentiment
-        for sentence in sentences:
-            sentence_lower = sentence.lower().strip()
-            if len(sentence_lower) > 20:  # Skip very short sentences
-                # Check if sentence contains financial terminology OR sentiment words
-                has_financial = any(pattern in sentence_lower for pattern in financial_patterns)
-                has_positive = any(word in sentence_lower for word in positive_words)
-                has_negative = any(word in sentence_lower for word in negative_words)
-                
-                if has_financial or has_positive or has_negative:
-                    financial_sentences.append(sentence.strip())
-        
-        # Add top 5 most relevant financial sentences to the extract
-        if financial_sentences:
-            # Limit to top 5 sentences to avoid making extract too long
-            top_financial_sentences = financial_sentences[:5]
-            financial_text = ' '.join(top_financial_sentences)
+            # find where content ends
+            for i in range(len(words) - 50, len(words)):
+                if any(pattern in ' '.join(words[i:i+3]).lower() for pattern in closing_patterns):
+                    end_idx = i
+                    break
             
-            # Combine with the opening/closing extract
-            if len(transcript_extract.split()) + len(financial_text.split()) < 300:
-                transcript_extract = transcript_extract + ' ' + financial_text
+            # Extract first 100 words after greetings and last 100 words before closing
+            meaningful_words = words[start_idx:end_idx]
+            if len(meaningful_words) > 200:
+                transcript_extract = ' '.join(meaningful_words[:100] + meaningful_words[-100:])
             else:
-                # If too long, prioritize financial sentences
-                transcript_extract = financial_text
-    else:
-        # For short transcripts, use the full text
-        transcript_extract = transcript
+                transcript_extract = ' '.join(meaningful_words)
+            
+            # extract financial sentences with key terms
+            financial_sentences = []
+            sentences = text.split('.')
+            
+            # financial terms to look for
+            financial_patterns = [
+                # EPS and earnings terms
+                'eps', 'earnings per share', 'earnings', 'profit', 'income', 'revenue',
+                'beat', 'miss', 'exceed', 'outperform', 'underperform', 'surprise',
+                'forecast', 'guidance', 'expectations', 'target', 'projection',
+                
+                # Performance indicators
+                'growth', 'increase', 'decrease', 'rise', 'fall', 'up', 'down',
+                'strong', 'weak', 'robust', 'solid', 'challenging', 'difficult',
+                'outstanding', 'exceptional', 'disappointing', 'concerning',
+                
+                # Financial metrics
+                'margin', 'profitability', 'operational', 'execution', 'performance',
+                'results', 'quarterly', 'annual', 'year-over-year', 'sequential',
+                
+                # Numbers and percentages
+                'percent', '%', 'basis points', 'million', 'billion', 'thousand',
+                'dollar', '$', 'cents', 'share', 'shares'
+            ]
+            
+            # sentiment words to look for
+            positive_words = ['strong', 'exceed', 'outperform', 'growth', 'record', 'pleased', 
+                             'excellent', 'robust', 'solid', 'positive', 'improve', 'increase', 
+                             'rise', 'gain', 'success', 'momentum', 'expansion', 'outstanding', 
+                             'exceptional', 'impressive', 'deliver', 'beat', 'surpass', 'outpace']
+            
+            negative_words = ['challenge', 'difficult', 'disappoint', 'pressure', 'headwind', 
+                             'decline', 'weak', 'struggle', 'concern', 'risk', 'uncertain', 
+                             'volatile', 'decrease', 'fall', 'drop', 'miss', 'underperform', 
+                             'disappointing', 'concerning', 'struggle', 'headwinds', 'pressure']
+            
+            # Extract sentences containing financial terminology and sentiment
+            for sentence in sentences:
+                sentence_lower = sentence.lower().strip()
+                if len(sentence_lower) > 20:  # Skip very short sentences
+                    # Check if sentence contains financial terminology OR sentiment words
+                    has_financial = any(pattern in sentence_lower for pattern in financial_patterns)
+                    has_positive = any(word in sentence_lower for word in positive_words)
+                    has_negative = any(word in sentence_lower for word in negative_words)
+                    
+                    if has_financial or has_positive or has_negative:
+                        financial_sentences.append(sentence.strip())
+            
+            # Add top 5 most relevant financial sentences to the extract
+            if financial_sentences:
+                # Limit to top 5 sentences to avoid making extract too long
+                top_financial_sentences = financial_sentences[:5]
+                financial_text = ' '.join(top_financial_sentences)
+                
+                # Combine with the opening/closing extract
+                if len(transcript_extract.split()) + len(financial_text.split()) < 300:
+                    transcript_extract = transcript_extract + ' ' + financial_text
+                else:
+                    # If too long, prioritize financial sentences
+                    transcript_extract = financial_text
+        else:
+            # For short transcripts, use the full text
+            transcript_extract = text
+        
+        return transcript_extract
+
+    # Process prepared remarks section
+    prepared_extract = extract_meaningful_content(remarks_text)
+    
+    # Process Q&A section if it exists
+    qa_extract = ""
+    if has_qa_section and qa_text:
+        qa_extract = extract_meaningful_content(qa_text)
     
     # get embeddings and compute similarity
     try:
-        embeddings = embed_func([transcript_extract, numbers_text], api_base, model)
-        transcript_embedding, numbers_embedding = embeddings
+        # Prepare texts for embedding
+        texts_to_embed = [prepared_extract, numbers_text]
+        if has_qa_section and qa_extract:
+            texts_to_embed.append(qa_extract)
         
-        cosine_sim = cosine(transcript_embedding, numbers_embedding)
+        embeddings = embed_func(texts_to_embed, api_base, model)
+        prepared_embedding = embeddings[0]
+        numbers_embedding = embeddings[1]
         
-        # Basic NNW calculation
-        nnw_score = 1.0 - cosine_sim
+        # Compute similarity for prepared remarks
+        sim_prepared = cosine(prepared_embedding, numbers_embedding)
         
-        return cosine_sim, nnw_score
+        # Compute similarity for Q&A section (if exists)
+        sim_qa = 0.0
+        if has_qa_section and qa_extract:
+            qa_embedding = embeddings[2]
+            sim_qa = cosine(qa_embedding, numbers_embedding)
+        
+        # Calculate weighted final NNW score
+        if has_qa_section and qa_extract:
+            nnw_final = 1.0 - (prepared_weight * sim_prepared + qa_weight * sim_qa)
+        else:
+            # If no Q&A section, use only prepared remarks
+            nnw_final = 1.0 - sim_prepared
+        
+        return sim_prepared, sim_qa, nnw_final, has_qa_section
     except Exception as e:
-        raise Exception(f"Failed to compute NNW: {e}")
+        raise Exception(f"Failed to compute enhanced NNW: {e}")
+
+
+def compute_simple_nnw(transcript, eps_actual, eps_forecast, embed_func, api_base, model):
+    """
+    Basic NNW calculation - just compares transcript to EPS context.
+    This is kept for backward compatibility.
+    """
+    # Parse transcript into sections
+    remarks_text, qa_text, has_qa_section = parse_transcript_sections(
+        transcript, "Q&A", 8000
+    )
+    
+    # Use enhanced NNW with default weights
+    sim_prepared, sim_qa, nnw_final, _ = compute_enhanced_nnw(
+        remarks_text, qa_text, has_qa_section, eps_actual, eps_forecast, 
+        embed_func, api_base, model, 0.7, 0.3
+    )
+    
+    # Return in the old format for compatibility
+    return sim_prepared, nnw_final
 
 
 def parse_float_safe(value):
@@ -325,6 +430,12 @@ def main():
                        help="Max transcript length")
     parser.add_argument("--qa_split_hint", default="Q&A", 
                        help="Where to cut off transcript")
+    parser.add_argument("--prepared_weight", type=float, default=0.7,
+                       help="Weight for prepared remarks section (default 0.7)")
+    parser.add_argument("--qa_weight", type=float, default=0.3,
+                       help="Weight for Q&A section (default 0.3)")
+    parser.add_argument("--use_enhanced", action="store_true",
+                       help="Use enhanced NNW calculation with Q&A analysis")
     
     args = parser.parse_args()
     
@@ -400,33 +511,63 @@ def main():
             skipped += 1
             continue
         
-        # read the transcript
-        transcript_text = read_and_trim_transcript(
-            transcript_path, args.qa_split_hint, args.max_chars
-        )
-        
-        if not transcript_text:
-            print(f"Warning: Empty transcript for {ticker} {period}")
-            skipped += 1
-            continue
-        
         try:
-            # compute NNW score
-            cosine_sim, nnw = compute_simple_nnw(
-                transcript_text, eps_actual, eps_forecast, 
-                embed, args.api_base, args.model
-            )
-            
-            # save the result
-            results.append({
-                'ticker': ticker,
-                'period': period,
-                'eps_actual': eps_actual,
-                'eps_forecast': eps_forecast,
-                'transcript_path': transcript_path,
-                'cosine': cosine_sim,
-                'nnw': nnw
-            })
+            if args.use_enhanced:
+                # Parse transcript into sections
+                remarks_text, qa_text, has_qa_section = parse_transcript_sections(
+                    transcript_path, args.qa_split_hint, args.max_chars
+                )
+                
+                if not remarks_text:
+                    print(f"Warning: Empty transcript for {ticker} {period}")
+                    skipped += 1
+                    continue
+                
+                # compute enhanced NNW score
+                sim_prepared, sim_qa, nnw_final, has_qa = compute_enhanced_nnw(
+                    remarks_text, qa_text, has_qa_section, eps_actual, eps_forecast, 
+                    embed, args.api_base, args.model, args.prepared_weight, args.qa_weight
+                )
+                
+                # save the result
+                results.append({
+                    'ticker': ticker,
+                    'period': period,
+                    'eps_actual': eps_actual,
+                    'eps_forecast': eps_forecast,
+                    'transcript_path': transcript_path,
+                    'cosine_prepared': sim_prepared,
+                    'cosine_qa': sim_qa,
+                    'nnw_final': nnw_final,
+                    'has_qa_section': has_qa
+                })
+            else:
+                # Use original method for backward compatibility
+                transcript_text = read_and_trim_transcript(
+                    transcript_path, args.qa_split_hint, args.max_chars
+                )
+                
+                if not transcript_text:
+                    print(f"Warning: Empty transcript for {ticker} {period}")
+                    skipped += 1
+                    continue
+                
+                # compute simple NNW score
+                cosine_sim, nnw = compute_simple_nnw(
+                    transcript_text, eps_actual, eps_forecast, 
+                    embed, args.api_base, args.model
+                )
+                
+                # save the result
+                results.append({
+                    'ticker': ticker,
+                    'period': period,
+                    'eps_actual': eps_actual,
+                    'eps_forecast': eps_forecast,
+                    'transcript_path': transcript_path,
+                    'cosine': cosine_sim,
+                    'nnw': nnw
+                })
             
         except Exception as e:
             print(f"Warning: Failed to process {ticker} {period}: {e}")
@@ -445,10 +586,17 @@ def main():
         
         if processed > 0:
             print("\nTop NNW scores:")
-            top_results = results_df.nlargest(3, 'nnw')
-            for i, (_, row) in enumerate(top_results.iterrows(), 1):
-                print(f"{i}) {row['ticker']} {row['period']}  "
-                      f"NNW={row['nnw']:.3f}  cosine={row['cosine']:.3f}")
+            if args.use_enhanced:
+                top_results = results_df.nlargest(3, 'nnw_final')
+                for i, (_, row) in enumerate(top_results.iterrows(), 1):
+                    qa_info = f" (Q&A: {row['cosine_qa']:.3f})" if row['has_qa_section'] else " (No Q&A)"
+                    print(f"{i}) {row['ticker']} {row['period']}  "
+                          f"NNW={row['nnw_final']:.3f}  prepared={row['cosine_prepared']:.3f}{qa_info}")
+            else:
+                top_results = results_df.nlargest(3, 'nnw')
+                for i, (_, row) in enumerate(top_results.iterrows(), 1):
+                    print(f"{i}) {row['ticker']} {row['period']}  "
+                          f"NNW={row['nnw']:.3f}  cosine={row['cosine']:.3f}")
     else:
         print("No results to write")
 
