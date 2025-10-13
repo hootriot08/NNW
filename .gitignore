@@ -1,1 +1,8 @@
 transcripts_by_company/
+
+# EPS files
+**/*EPS*
+**/*.eps
+
+# Exceptions - keep these files tracked
+!results/matched_transcript_eps_comprehensive.csv
