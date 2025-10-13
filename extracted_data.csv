@@ -1,4 +1,4 @@
-Cusip,Company_Name,Ticker,Eps-actual,eps_forecast,anndats,transcript_date
+Cusip,Company_Name,Ticker,eps_actual,eps_latest_forecast,anndats,transcript_date
 88025U10,10X GENOMICS INC,TXG,-0.8,-0.37,2020-02-18,2020-02-18
 88025U10,10X GENOMICS INC,TXG,-0.41,-0.55,2020-08-11,2020-08-11
 88025U10,10X GENOMICS INC,TXG,-0.65,-0.3,2020-11-10,2020-11-10
